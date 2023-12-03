@@ -2,15 +2,7 @@
 AWS lambdaからTwitter APIを叩く
 
 # 手順
-## step1　tweepyをコールできるようにする
-lambdaには必要最低限のライブラリしかないので、レイヤーを追加することで実行できるようにする。  
-cloud9の環境でpip install、ZIP化してそれをlambdaレイヤーに追加する。  
-
-$ mkdir python  
-$ pip install -t ./python tweepy  
-$ zip -r pandas.zip python  
-
-- 参考  
+- layar 追加参考  
 https://qiita.com/thimi0412/items/4c725ec2b26aef59e5bd
 
 
