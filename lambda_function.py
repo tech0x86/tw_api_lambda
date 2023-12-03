@@ -1,99 +1,88 @@
 # -*- coding: utf-8 -*-
-from tracemalloc import stop
-import tweepy
+import base64
 import json
 import os
 import re
-from datetime import datetime, timedelta, timezone
 import random
 import boto3
-from io import BytesIO
+from requests_oauthlib import OAuth1Session
+from datetime import datetime, timedelta, timezone
 
+# タイムゾーンの設定
 JST = timezone(timedelta(hours=+9), 'JST')
 
-s3 = boto3.resource('s3')
-bucket = s3.Bucket('my-pic-bucket')
-IMG_PATH = "pic01/" # bucket内の画像パス
+# APIエンドポイント
+url_tweets = "https://api.twitter.com/2/tweets"
+url_media = 'https://upload.twitter.com/1.1/media/upload.json'
 
-# twitter account No02
+# S3バケット名とプレフィックス
+BUCKET_NAME = 'my-pic-bucket'
+IMG_PATH_PREFIX = "pic01/"
+
+# Twitterの認証情報の取得
 ssm = boto3.client('ssm')
-response = ssm.get_parameter(
-    Name='twitter_sec',
-    WithDecryption=True
-)
-twitter_sec = response['Parameter']['Value']
-twitter_sec = json.loads(twitter_sec)
+twitter_sec = json.loads(ssm.get_parameter(Name='twitter_sec', WithDecryption=True)['Parameter']['Value'])
+# OAuth1セッションの作成
+twitter = OAuth1Session(twitter_sec["CK"], client_secret=twitter_sec["CS"], resource_owner_key=twitter_sec["AT"], resource_owner_secret=twitter_sec["AS"])
 
-CK=twitter_sec["CK"]
-CS=twitter_sec["CS"]
-AT=twitter_sec["AT"]
-AS=twitter_sec["AS"]
+def tweet_text_only(text="test_tweet"):
+    now = datetime.now(JST).strftime("%Y年%-m月%-d日 %H時%M分%S秒")
+    text_with_time = text + now
+    tweet_data = {"text": text_with_time}
+    headers = {"Content-Type": "application/json"}
 
-def tweetTextOnly(twText):
-    now = datetime.now(JST).strftime(" %Y年%-m月%-d日")
-    auth = tweepy.OAuthHandler(CK, CS)
-    auth.set_access_token(AT, AS)
-    TW_API = tweepy.API(auth)
-    Text = twText + now
-    try:
-        response = TW_API.update_status(status=Text)
-    except Exception as e:
-        print (e + "ERROR at text")
-        print(response.text)
-        
-    return
+    response = twitter.post(url_tweets, headers=headers, data=json.dumps(tweet_data))
+    if response.status_code not in [200, 201]:
+        raise Exception(f"Tweet post failed: {response.status_code}, {response.text}")
+    print(response.json())
 
-def tweetTextMedia(twText, imgName):
-    auth = tweepy.OAuthHandler(CK, CS)
-    auth.set_access_token(AT, AS)
-    TW_API = tweepy.API(auth)
-    
-    media_ids = []
-    img = TW_API.media_upload(filename='img',file=BytesIO(imgName))
+def convert_to_base64(image_data):
+    # バイナリデータをBase64にエンコード
+    return base64.b64encode(image_data).decode('utf-8')
 
-    media_ids.append(img.media_id)
-    try:
-        response = TW_API.update_status(status=twText, media_ids=media_ids)
-    except Exception as e:
-        print (e + "ERROR at upload")
-        print(response.text)
-    return
+def upload_media(media_bin):
+    media_data = convert_to_base64(media_bin)
+    response = twitter.post(url_media, data={'media': media_data})
+    if response.status_code not in [200, 201]:
+        raise Exception(f"Media upload failed: {response.status_code}, {response.text}")
+    media_id = response.json()['media_id_string']
+    print(f"media_id: {media_id}")
+    return media_id
 
-# 画像パスをS3からランダムに抽出する
-def get_img_path_from_s3():
-    files = []
-    for object in bucket.objects.filter(Prefix=IMG_PATH):
-        print(object.key)
-        files.append(object.key)
-        # output: pic01/IMG_4613.JPG ...
+def tweet_text_with_media(text, media_ids):
+    tweet_data = {"text": text, "media": {"media_ids": media_ids}}
+    headers = {"Content-Type": "application/json"}
 
-    #拡張子が画像形式のものをリスト化
-    img_files = [f for f in files if re.search(r'\.jpg|\.JPG|\.png|\.PNG', f)]
-    print (img_files)
-    #画像リストの中からランダムにimg nameを一つ選択
-    s3_img_path = img_files[random.randint(0, len(img_files) -1)]
+    response = twitter.post(url_tweets, headers=headers, data=json.dumps(tweet_data))
+    if response.status_code not in [200, 201]:
+        raise Exception(f"Tweet with media failed: {response.status_code}, {response.text}")
+    print(response.json())
 
-    return s3_img_path
+def get_random_image_path_from_s3():
+    s3 = boto3.resource('s3')
+    bucket = s3.Bucket(BUCKET_NAME)
 
+    img_files = [obj.key for obj in bucket.objects.filter(Prefix=IMG_PATH_PREFIX)
+                 if re.search(r'\.(jpg|JPG|png|PNG)$', obj.key)]
+    return random.choice(img_files) if img_files else None
 
-# 画像ファイルのバイナリファイルを返す
-def get_img_from_s3(s3_img_path):
-    obj = bucket.Object(s3_img_path)
-    response = obj.get()
-    s3_img = response['Body'].read()
-    return s3_img
+def get_image_from_s3(image_path):
+    s3 = boto3.resource('s3')
+    obj = s3.Bucket(BUCKET_NAME).Object(image_path)
+    return obj.get()['Body'].read()
 
 def lambda_handler(event, context):
-    
-    print('start main func')
-    now = datetime.now(JST).strftime("%Y年%-m月%-d日")
-    #tweetTextOnly("@akiko_lawson test1")
-    img_path = get_img_path_from_s3()
-    img = get_img_from_s3(img_path)
-    print(str(img_path) + " " + now)
-    tweetTextMedia("@akiko_lawson TEST " + now ,img)
+    img_path = get_random_image_path_from_s3()
+    print(f"image_name: {img_path}")
+    #img_path = None
+    if img_path:
+        img_bin = get_image_from_s3(img_path)
+        media_id = upload_media(img_bin)
+        tweet_text_with_media("今日も一日", [media_id])
+    else:
+        tweet_text_only("@akiko_lawson test1 ")
 
     return {
         'statusCode': 200,
-        'body': json.dumps('Hello from Lambda!')
+        'body': json.dumps('Function executed successfully!')
     }
